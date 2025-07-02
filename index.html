@@ -25,9 +25,38 @@
             color: white; 
             padding: 30px; 
             text-align: center;
+            position: relative;
         }
         .header h1 { font-size: 2.5em; margin-bottom: 10px; }
-        .header p { opacity: 0.9; }
+        .header p { opacity: 0.9; margin-bottom: 15px; }
+        .stats { 
+            display: flex; 
+            justify-content: center; 
+            gap: 20px; 
+            font-size: 14px;
+        }
+        .stat-item { 
+            background: rgba(255,255,255,0.2); 
+            padding: 8px 12px; 
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+        }
+        .status-indicator {
+            position: absolute;
+            top: 15px;
+            right: 20px;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #28a745;
+            animation: pulse 2s infinite;
+        }
+        .status-indicator.offline { background: #dc3545; }
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
         .content { padding: 30px; }
         .add-form { 
             display: flex; 
@@ -54,9 +83,14 @@
             border-radius: 10px; 
             cursor: pointer; 
             font-weight: bold;
-            transition: transform 0.2s;
+            transition: all 0.2s;
         }
         .add-form button:hover { transform: translateY(-2px); }
+        .add-form button:disabled { 
+            opacity: 0.6; 
+            cursor: not-allowed; 
+            transform: none;
+        }
         .task-sections { display: flex; flex-direction: column; gap: 20px; }
         .section { 
             background: #f8f9fa; 
@@ -93,8 +127,10 @@
             margin-bottom: 10px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.05);
             transition: all 0.3s;
+            position: relative;
         }
         .task-item:hover { transform: translateX(5px); }
+        .task-item.updating { opacity: 0.6; }
         .task-item input[type="checkbox"] { 
             width: 18px; 
             height: 18px; 
@@ -103,6 +139,11 @@
         .task-text { 
             flex: 1; 
             transition: all 0.3s;
+        }
+        .task-meta {
+            font-size: 11px;
+            color: #999;
+            margin-top: 4px;
         }
         .completed .task-text { 
             text-decoration: line-through; 
@@ -122,26 +163,67 @@
             background: #c82333; 
             transform: scale(1.05);
         }
+        .delete-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
         .empty { 
             text-align: center; 
             color: #6c757d; 
             font-style: italic; 
             padding: 20px;
         }
+        .loading { 
+            text-align: center; 
+            padding: 20px; 
+            color: #6c757d;
+        }
+        .error { 
+            background: #f8d7da; 
+            color: #721c24; 
+            padding: 12px; 
+            border-radius: 8px; 
+            margin-bottom: 20px;
+            border: 1px solid #f5c6cb;
+        }
+        .refresh-btn {
+            background: #17a2b8;
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-left: 10px;
+            transition: all 0.2s;
+        }
+        .refresh-btn:hover { background: #138496; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
+            <div class="status-indicator" id="statusIndicator"></div>
             <h1>📝 Todo List</h1>
             <p>Stay organized and productive</p>
+            <div class="stats">
+                <div class="stat-item">Total: <span id="totalStat">0</span></div>
+                <div class="stat-item">Pending: <span id="pendingStat">0</span></div>
+                <div class="stat-item">Done: <span id="completedStat">0</span></div>
+            </div>
         </div>
         
         <div class="content">
+            <div id="errorContainer"></div>
+            
             <div class="add-form">
                 <input type="text" id="taskInput" placeholder="Add a new task..." maxlength="100">
-                <button onclick="addTask()">➕ Add</button>
+                <button onclick="addTask()" id="addBtn">➕ Add</button>
+                <button onclick="loadTasks()" class="refresh-btn" id="refreshBtn">🔄</button>
             </div>
+            
+            <div id="loadingContainer"></div>
             
             <div class="task-sections">
                 <div class="section todos">
@@ -158,12 +240,136 @@
     </div>
 
     <script>
-        let tasks = [
-            { id: 1, text: "Watch Go course", completed: false },
-            { id: 2, text: "Learn Distributed databases", completed: false },
-            { id: 3, text: "Take some rest and eat some snacks", completed: false }
-        ];
-        let nextId = 4;
+        let tasks = [];
+        let isLoading = false;
+
+        // API functions
+        async function apiCall(url, options = {}) {
+            try {
+                const response = await fetch(url, {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...options.headers
+                    },
+                    ...options
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                if (response.status === 204) {
+                    return null; // No content
+                }
+                
+                return await response.json();
+            } catch (error) {
+                console.error('API call failed:', error);
+                throw error;
+            }
+        }
+
+        async function loadTasks() {
+            if (isLoading) return;
+            
+            setLoading(true);
+            clearError();
+            
+            try {
+                tasks = await apiCall('/api/tasks');
+                updateConnectionStatus(true);
+                renderTasks();
+                await loadStats();
+            } catch (error) {
+                showError('Failed to load tasks: ' + error.message);
+                updateConnectionStatus(false);
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        async function loadStats() {
+            try {
+                const stats = await apiCall('/api/stats');
+                document.getElementById('totalStat').textContent = stats.total;
+                document.getElementById('pendingStat').textContent = stats.pending;
+                document.getElementById('completedStat').textContent = stats.completed;
+            } catch (error) {
+                console.error('Failed to load stats:', error);
+            }
+        }
+
+        async function addTask() {
+            const input = document.getElementById('taskInput');
+            const text = input.value.trim();
+            if (!text) return;
+            
+            setButtonLoading('addBtn', true);
+            clearError();
+            
+            try {
+                await apiCall('/api/tasks', {
+                    method: 'POST',
+                    body: JSON.stringify({ text })
+                });
+                
+                input.value = '';
+                await loadTasks();
+            } catch (error) {
+                showError('Failed to add task: ' + error.message);
+            } finally {
+                setButtonLoading('addBtn', false);
+            }
+        }
+
+        async function toggleTask(id, currentStatus) {
+            const taskElement = document.querySelector(`[data-task-id="${id}"]`);
+            if (taskElement) {
+                taskElement.classList.add('updating');
+            }
+            
+            try {
+                await apiCall(`/api/tasks/${id}`, {
+                    method: 'PUT',
+                    body: JSON.stringify({ completed: !currentStatus })
+                });
+                
+                await loadTasks();
+            } catch (error) {
+                showError('Failed to update task: ' + error.message);
+                // Revert checkbox state on error
+                const checkbox = taskElement?.querySelector('input[type="checkbox"]');
+                if (checkbox) {
+                    checkbox.checked = currentStatus;
+                }
+            } finally {
+                if (taskElement) {
+                    taskElement.classList.remove('updating');
+                }
+            }
+        }
+
+        async function deleteTask(id) {
+            if (!confirm('Are you sure you want to delete this task?')) return;
+            
+            const deleteBtn = document.querySelector(`[data-task-id="${id}"] .delete-btn`);
+            if (deleteBtn) {
+                deleteBtn.disabled = true;
+            }
+            
+            try {
+                await apiCall(`/api/tasks/${id}`, {
+                    method: 'DELETE'
+                });
+                
+                await loadTasks();
+            } catch (error) {
+                showError('Failed to delete task: ' + error.message);
+                if (deleteBtn) {
+                    deleteBtn.disabled = false;
+                }
+            }
+        }
 
         function renderTasks() {
             const todoList = document.getElementById('todoList');
@@ -185,44 +391,69 @@
         }
 
         function createTaskHTML(task) {
+            const createdDate = new Date(task.created_at).toLocaleDateString();
+            const updatedDate = new Date(task.updated_at).toLocaleDateString();
+            
             return `
-                <div class="task-item ${task.completed ? 'completed' : ''}">
+                <div class="task-item ${task.completed ? 'completed' : ''}" data-task-id="${task.id}">
                     <input type="checkbox" ${task.completed ? 'checked' : ''} 
-                           onchange="toggleTask(${task.id})">
-                    <span class="task-text">${task.text}</span>
+                           onchange="toggleTask(${task.id}, ${task.completed})">
+                    <div class="task-text">
+                        ${task.text}
+                        <div class="task-meta">
+                            Created: ${createdDate}${task.completed ? ` • Completed: ${updatedDate}` : ''}
+                        </div>
+                    </div>
                     <button class="delete-btn" onclick="deleteTask(${task.id})">🗑️</button>
                 </div>
             `;
         }
 
-        function addTask() {
-            const input = document.getElementById('taskInput');
-            const text = input.value.trim();
-            if (text) {
-                tasks.push({ id: nextId++, text, completed: false });
-                input.value = '';
-                renderTasks();
+        function setLoading(loading) {
+            isLoading = loading;
+            const container = document.getElementById('loadingContainer');
+            const refreshBtn = document.getElementById('refreshBtn');
+            
+            if (loading) {
+                container.innerHTML = '<div class="loading">Loading tasks...</div>';
+                refreshBtn.disabled = true;
+            } else {
+                container.innerHTML = '';
+                refreshBtn.disabled = false;
             }
         }
 
-        function toggleTask(id) {
-            const task = tasks.find(t => t.id === id);
-            if (task) {
-                task.completed = !task.completed;
-                renderTasks();
-            }
+        function setButtonLoading(buttonId, loading) {
+            const button = document.getElementById(buttonId);
+            button.disabled = loading;
         }
 
-        function deleteTask(id) {
-            tasks = tasks.filter(t => t.id !== id);
-            renderTasks();
+        function showError(message) {
+            const container = document.getElementById('errorContainer');
+            container.innerHTML = `<div class="error">${message}</div>`;
+            setTimeout(() => container.innerHTML = '', 5000);
         }
 
+        function clearError() {
+            document.getElementById('errorContainer').innerHTML = '';
+        }
+
+        function updateConnectionStatus(connected) {
+            const indicator = document.getElementById('statusIndicator');
+            indicator.className = connected ? '' : 'offline';
+            indicator.title = connected ? 'Connected to server' : 'Disconnected from server';
+        }
+
+        // Event listeners
         document.getElementById('taskInput').addEventListener('keypress', function(e) {
             if (e.key === 'Enter') addTask();
         });
 
-        renderTasks();
+        // Auto-refresh every 30 seconds
+        setInterval(loadTasks, 30000);
+
+        // Initial load
+        loadTasks();
     </script>
 </body>
 </html>
