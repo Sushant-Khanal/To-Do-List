@@ -1,5 +1,5 @@
-## To-Do-List ##
-# *A To-Do list* #
+# To-Do-List #
+### *A To-Do list* ###
 module todo-app
 
 go 1.21
